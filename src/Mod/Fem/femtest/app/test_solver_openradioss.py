@@ -119,6 +119,11 @@ class TestSolverOpenRadioss(unittest.TestCase):
         machine.start()
         machine.join()
         self.assertFalse(machine.failed, f"OpenRadioss run failed, see {working_dir}")
+        if FreeCAD.GuiUp:
+            # the result objects are created in the main thread
+            from PySide import QtCore
+
+            QtCore.QCoreApplication.processEvents()
         result = self.document.getObject("OpenRadiossResult")
         self.assertIsNotNone(result)
         # the beam bends in -z

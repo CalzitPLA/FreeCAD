@@ -30,10 +30,11 @@ and statistics computed by FreeCAD's resulttools, and a post-processing
 pipeline built from it.
 
 The FEM solver framework runs the Results task in a worker thread while the
-main thread waits for it. Recomputing a pipeline updates its 3D view, which
-must happen in the main thread: done from the worker it deadlocks the GUI.
-So in the GUI the pipeline is built in the main thread, as soon as the solver
-run returns to the event loop (see ``in_main_thread``).
+main thread waits for it. Document objects must be created in the main
+thread: done from the worker it deadlocks the GUI. So the Results task only
+reads the frame (``read_result``), and ``create_result`` makes the objects in
+the main thread as soon as the solver run returns to the event loop (see
+``in_main_thread``).
 """
 
 __title__ = "FreeCAD FEM solver OpenRadioss results"
@@ -202,25 +203,13 @@ def femmesh_from_vtu(data, node_ids, displacement):
     return mesh
 
 
-def load_result(
-    doc,
-    vtu_path,
-    name="OpenRadiossResult",
-    analysis=None,
-    femmesh=None,
-    time=None,
-    pipeline_label=None,
-):
-    """Create a Fem::ResultMechanical (+ result mesh and pipeline) from ``vtu_path``.
+def read_result(vtu_path, femmesh=None):
+    """Read a result frame into plain data for ``create_result``.
 
     ``femmesh`` is the analysis mesh (node and element ids match the deck);
-    without it the mesh is rebuilt from the result file. Returns (result, pipeline).
-    Called from a worker thread in the GUI, the pipeline is created later in the
-    main thread and None is returned for it.
+    without it the mesh is rebuilt from the result file. Creates no document
+    objects, so it can run in the worker thread of the solver framework.
     """
-    import ObjectsFem
-    from femresult import resulttools
-
     data = read_vtu(vtu_path)
     arrays = data["arrays"]
     node_ids = [int(float(v)) for v in arrays["NODE_ID"][1]]
@@ -267,14 +256,34 @@ def load_result(
                     hits[n] = hits.get(n, 0) + 1
         node_peeq = {n: sums[n] / hits[n] for n in sums}
 
+    stress = [
+        [node_stress[n][k] / count[n] if n in count else 0.0 for n in node_numbers]
+        for k in range(6)
+    ]
+    return {
+        "femmesh": femmesh,
+        "node_numbers": node_numbers,
+        "displacements": [displacement.get(n, (0.0, 0.0, 0.0)) for n in node_numbers],
+        "stress": stress,  # xx, yy, zz, xy, xz, yz per node
+        "peeq": [node_peeq.get(n, 0.0) for n in node_numbers] if node_peeq else None,
+    }
+
+
+def create_result(doc, data, name="OpenRadiossResult", analysis=None, time=None, label=None):
+    """Create a Fem::ResultMechanical, its result mesh and a pipeline from ``read_result`` data.
+
+    Creates document objects: in the GUI call it in the main thread (see
+    ``in_main_thread``). Returns (result, pipeline).
+    """
+    import ObjectsFem
+    from femresult import resulttools
+
     res = ObjectsFem.makeResultMechanical(doc, name)
     mesh_obj = ObjectsFem.makeMeshResult(doc, name + "_Mesh")
-    mesh_obj.FemMesh = femmesh
+    mesh_obj.FemMesh = data["femmesh"]
     res.Mesh = mesh_obj
-    res.NodeNumbers = node_numbers
-    res.DisplacementVectors = [
-        FreeCAD.Vector(*displacement.get(n, (0.0, 0.0, 0.0))) for n in node_numbers
-    ]
+    res.NodeNumbers = data["node_numbers"]
+    res.DisplacementVectors = [FreeCAD.Vector(*d) for d in data["displacements"]]
     components = (
         "NodeStressXX",
         "NodeStressYY",
@@ -283,13 +292,14 @@ def load_result(
         "NodeStressXZ",
         "NodeStressYZ",
     )
-    for k, prop in enumerate(components):
-        values = [node_stress[n][k] / count[n] if n in count else 0.0 for n in node_numbers]
+    for prop, values in zip(components, data["stress"]):
         setattr(res, prop, values)
-    if node_peeq:  # shown as "Equivalent Plastic Strain" in the pipeline
-        res.Peeq = [node_peeq.get(n, 0.0) for n in node_numbers]
+    if data["peeq"]:  # shown as "Equivalent Plastic Strain" in the pipeline
+        res.Peeq = data["peeq"]
     if time is not None:
         res.Time = time
+    if label:
+        res.Label = label
     if analysis is not None:
         analysis.addObject(res)
         analysis.addObject(mesh_obj)
@@ -298,21 +308,24 @@ def load_result(
     res = resulttools.add_principal_stress_std(res)
     res = resulttools.fill_femresult_stats(res)
 
-    def make_pipeline():
-        pipeline = ObjectsFem.makePostVtkResult(doc, [res], name)
-        if pipeline_label:
-            pipeline.Label = pipeline_label
-        if analysis is not None:
-            analysis.addObject(pipeline)
-        pipeline.recomputeChildren()
-        pipeline.recompute()
-        mesh_obj.Visibility = False
-        if FreeCAD.GuiUp:
-            pipeline.ViewObject.updateColorBars()
-        doc.recompute()
-        return pipeline
+    pipeline = ObjectsFem.makePostVtkResult(doc, [res], name)
+    if label:
+        pipeline.Label = "Pipeline " + label
+    if analysis is not None:
+        analysis.addObject(pipeline)
+    pipeline.recomputeChildren()
+    pipeline.recompute()
+    mesh_obj.Visibility = False
+    if FreeCAD.GuiUp:
+        pipeline.ViewObject.updateColorBars()
+    doc.recompute()
+    return res, pipeline
 
-    return res, in_main_thread(make_pipeline)
+
+def load_result(doc, vtu_path, name="OpenRadiossResult", analysis=None, femmesh=None, time=None):
+    """``read_result`` and ``create_result`` in one call, for scripts in the main thread."""
+    data = read_result(vtu_path, femmesh)
+    return create_result(doc, data, name, analysis, time)
 
 
 ##  @}

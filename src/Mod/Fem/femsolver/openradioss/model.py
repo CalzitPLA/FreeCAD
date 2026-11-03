@@ -46,6 +46,7 @@ __url__ = "https://www.freecad.org"
 import math
 
 import FreeCAD
+from FreeCAD import Base
 
 from femmesh import meshsetsgetter
 from femmesh import meshtools
@@ -187,10 +188,12 @@ class ModelBuilder:
         self.analysis = analysis
         self.solver = solver
         self.warnings = []
-        meshes = [mesh_obj] if mesh_obj else membertools.get_mesh_to_solve(analysis)[0:1]
-        if not meshes or meshes[0] is None:
-            raise ModelError("The analysis has no mesh.")
-        self.mesh_obj = meshes[0]
+        if mesh_obj is None:
+            try:
+                mesh_obj = membertools.get_mesh_to_solve(analysis)
+            except Base.FreeCADError as e:  # no mesh or several meshes
+                raise ModelError(str(e))
+        self.mesh_obj = mesh_obj
         self.femmesh = self.mesh_obj.FemMesh
         self.member = membertools.AnalysisMember(analysis)
         meshsetsgetter.MeshSetsGetter(analysis, solver, self.mesh_obj, self.member).get_mesh_sets()

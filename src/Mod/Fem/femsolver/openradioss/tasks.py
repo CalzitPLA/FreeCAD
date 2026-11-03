@@ -168,41 +168,38 @@ class Results(run.Results):
             self.report.error("No result frames found.")
             self.fail()
             return
-        prefs = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/General")
-        doc = self.analysis.Document
-        if not prefs.GetBool("KeepResultsOnReRun", False):
-            old = [obj.Name for obj in self.analysis.Group if obj.Name.startswith(RESULT_PREFIX)]
-            old_pipelines = [
-                obj.Name
-                for obj in self.analysis.Group
-                if obj.Name.startswith("Pipeline_" + RESULT_PREFIX)
-            ]
-            for name in old:
-                doc.removeObject(name)
-            # pipelines have a 3D view: remove them in the main thread (queued before the new one)
-            results.in_main_thread(
-                lambda: [doc.removeObject(n) for n in old_pipelines if doc.getObject(n)]
-            )
         last = os.path.join(self.directory, frames[-1])
-        mesh_obj = membertools.get_mesh_to_solve(self.analysis)[0]
+        mesh_obj = membertools.get_mesh_to_solve(self.analysis)
         end_time = self.solver.EndTime.getValueAs("s").Value
-        result, _pipeline = results.load_result(
-            doc,
-            last,
-            RESULT_PREFIX,
-            self.analysis,
-            femmesh=mesh_obj.FemMesh,
-            time=end_time,
-            pipeline_label=f"Pipeline {RESULT_PREFIX} (t = {end_time:g} s)",
+        self.pushStatus(f"Reading {frames[-1]}...\n")
+        data = results.read_result(last, mesh_obj.FemMesh)
+
+        analysis = self.analysis
+        doc = analysis.Document
+        keep = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/General").GetBool(
+            "KeepResultsOnReRun", False
         )
-        result.Label = f"{RESULT_PREFIX} (t = {end_time:g} s)"
-        max_disp = max(result.DisplacementLengths or [0])
-        max_mises = max(result.vonMises or [0])
-        pvd = os.path.join(self.directory, JOB_NAME + ".pvd")
-        self.pushStatus(
-            f"Loaded {frames[-1]} as '{result.Label}' (max. displacement {max_disp:.4g} mm, "
-            f"max. von Mises {max_mises:.4g} MPa). All {len(frames)} frames: {pvd}\n"
-        )
+        label = f"{RESULT_PREFIX} (t = {end_time:g} s)"
+        summary = f"All {len(frames)} frames: {os.path.join(self.directory, JOB_NAME + '.pvd')}"
+
+        def create():
+            # document objects must be created in the main thread: in the GUI this runs
+            # when the solver run returns to the event loop
+            if not keep:
+                for obj in list(analysis.Group):
+                    if obj.Name.startswith((RESULT_PREFIX, "Pipeline_" + RESULT_PREFIX)):
+                        doc.removeObject(obj.Name)
+            result, _pipeline = results.create_result(
+                doc, data, RESULT_PREFIX, analysis, time=end_time, label=label
+            )
+            FreeCAD.Console.PrintMessage(
+                f"OpenRadioss: loaded {frames[-1]} as '{result.Label}' (max. displacement "
+                f"{max(result.DisplacementLengths or [0]):.4g} mm, max. von Mises "
+                f"{max(result.vonMises or [0]):.4g} MPa). {summary}\n"
+            )
+
+        results.in_main_thread(create)
+        self.pushStatus(f"Result frame read. {summary}\n")
 
 
 ##  @}
